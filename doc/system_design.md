@@ -1,12 +1,5 @@
 # Defense-in-Depth: System Design
 
-The following diagram represents the overall workings of the database system that is able to handle various threats that are stated in the threat model.
-
-
-- Use proxy server/s (HAProxy | PgBouncer | ProxySQL ) to perfrm security checks and handle DOS attacks.
-- Set statement_timeout on db server which aborts any statement that takes more than the specified time.
-- Use WAL-G for maintaining Physical Backups and Point-in-Time Recovery (PITR)
-- Use Network File System (NFS), a folder that lives on a different server but is mounted so it looks like a local folder on the DB server, to store database logs.
 ```mermaid
 ---
 config:
@@ -41,30 +34,30 @@ flowchart LR
         end
         
         subgraph Server [ Servers with CA Certificates & PK]
-            App[Web Server]
-            Proxy[Proxy Server]
+            Proxy[PgBouncer]:::big
+            classDef big font-size:25px,font-weight:bold;
             CRL[CRL Server]
         end
 
-        subgraph DB [PostgreSQL & Recovery Mecanism]
+        subgraph DB [PostgreSQL, Baackup & Recovery Mecanism]
             LKS@{ shape: cyl, label: "LUKS"}
-            POS[PostgreSQL]
+            POS[PostgreSQL]:::big
             WAL[WAL-G]
             TPM[TPM 2.0]
         end
-        Clients --> App
-        App --> Proxy
+        Clients --> Proxy
         Proxy --> POS
         Proxy --> CRL
         POS --> LKS
-        POS --> WAL
+        POS --archive_command--> WAL
+        WAL --backup_push--> POS
         TPM --> LKS
     end
     subgraph DBB [Backup]
-        BKP@{ shape: cyl, label: "DB Clone"}
-        LOG[DB Logs]
+        LOG@{ shape: cyl, label: "MinIO"}
+        
         WAL[WAL-G]
     end
-    WAL --> BKP
-    WAL --> LOG    
+    WAL --S3 protocol--> LOG
+    WAL --WAL--> LOG  
 ```
