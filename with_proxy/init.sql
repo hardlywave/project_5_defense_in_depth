@@ -10,6 +10,7 @@ INSERT INTO secret_data VALUES
   (2, 'bob',     '5500-0000-0000-0004', 87000),
   (3, 'charlie', '3782-8224-6310-005',  110000);
 
--- Create a limited-privilege user (authentication: cert + password, authorization: SELECT only)
-CREATE ROLE finance LOGIN PASSWORD 'finance_pass';
-GRANT SELECT ON secret_data TO finance;
+-- PgBouncer authenticates frontend clients by certificate CN=finance and
+-- connects upstream as backend role CN=database using certificate auth only.
+CREATE ROLE database LOGIN;
+GRANT SELECT ON secret_data TO database;

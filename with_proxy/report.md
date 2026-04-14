@@ -33,15 +33,15 @@ The hardened system (`docker-compose.yaml`) introduces four independent security
 ```mermaid
 graph LR
     subgraph frontend["frontend network"]
-        client["client\n(debian:trixie)"]
+    client["client\n(postgres:16)"]
         pgbouncer["database\n(PgBouncer)\nport 5432"]
     end
     subgraph backend["backend network"]
         pgbouncer
         postgres["postgres\n(PostgreSQL 16)\nnot exposed"]
     end
-    client -- "mTLS\n(cert + password)" --> pgbouncer
-    pgbouncer -- "TLS\n(server_tls_sslmode=require)" --> postgres
+    client -- "mTLS\n(cert only)" --> pgbouncer
+    pgbouncer -- "mTLS\n(cert only)" --> postgres
 ```
 
 - The **client** container exists only on the `frontend` network.
@@ -57,21 +57,22 @@ Two Docker networks (`backend` and `frontend`) segment the infrastructure. The c
 All database traffic is encrypted in transit:
 
 - **Client to PgBouncer** (frontend TLS): PgBouncer presents a server certificate (CN=`database`) and requires TLS from all connecting clients. Plaintext connections are rejected with `FATAL: SSL required`.
-- **PgBouncer to PostgreSQL** (backend TLS): PgBouncer connects to PostgreSQL over TLS (`server_tls_sslmode=require`) and verifies the server's certificate against the CA chain.
+- **PgBouncer to PostgreSQL** (backend TLS): PgBouncer connects to PostgreSQL over TLS (`server_tls_sslmode=verify-full`), verifies the PostgreSQL server certificate against the CA chain, and presents its own client certificate to PostgreSQL.
 - **PostgreSQL server TLS**: PostgreSQL is configured with `ssl=on` and presents a server certificate (CN=`postgres`) signed by the intermediate CA.
 
 ### Layer 3 -- Mutual TLS (mTLS)
 
-PgBouncer is configured with `client_tls_sslmode=verify-ca`, which requires clients to present a valid certificate signed by the trusted CA chain. This adds a non-forgeable authentication factor: even if an attacker obtains a password, they cannot establish a TLS connection without a valid private key.
+PgBouncer is configured with `client_tls_sslmode=verify-full`, which requires clients to present a valid certificate signed by the trusted CA chain. PostgreSQL is configured with `clientcert=verify-full` and `cert` authentication for the PgBouncer backend role. The result is mutual TLS on both hops with no password fallback.
 
 ### Layer 4 -- Authentication and Authorization
 
 Authentication and authorization are separated:
 
-- **Authentication** uses two independent factors:
-  1. A client certificate verified by PgBouncer against the CA chain (mTLS).
-  2. A password verified via SCRAM-SHA-256 (a salted challenge-response protocol that never sends the password in cleartext).
-- **Authorization** is enforced by PostgreSQL roles. The `finance` role (`init.sql`) can only execute SELECT queries on the `secret_data` table. INSERT, UPDATE, and DELETE operations are denied by the database.
+- **Authentication** is certificate-based on both hops:
+  1. The frontend client authenticates to PgBouncer with certificate subject `CN=finance`.
+  2. PgBouncer authenticates to PostgreSQL with certificate subject `CN=database`.
+- **Authorization** is enforced by PostgreSQL roles. PgBouncer uses the least-privilege backend role `database` (`init.sql`), which can only execute SELECT queries on the `secret_data` table. INSERT, UPDATE, and DELETE operations are denied by the database.
+- **Identity mapping note**: the client connects to PgBouncer as `finance`, but PgBouncer uses a fixed backend PostgreSQL role `database`, so `current_user` and `session_user` inside PostgreSQL resolve to `database`.
 
 ### PKI Structure
 
@@ -81,9 +82,9 @@ The certificate infrastructure uses a two-tier hierarchy:
 graph TD
     root["CS590-ROOT\n(Root CA)"]
     intermediate["CS590-INTERMEDIATE\n(Intermediate CA)"]
-    cert_db["Serial 1000: CN=database\n(server cert, PgBouncer)"]
-    cert_pg["Serial 1003: CN=postgres\n(server cert, PostgreSQL)"]
-    cert_cl["Serial 1004: CN=client\n(client cert, clientAuth)"]
+  cert_db["Serial 1006: CN=database\n(server + client cert, PgBouncer)"]
+  cert_pg["Serial 1005: CN=postgres\n(server cert, PostgreSQL)"]
+    cert_cl["Serial 1007: CN=finance\n(client cert, clientAuth)"]
     root --> intermediate
     intermediate --> cert_db
     intermediate --> cert_pg
@@ -98,17 +99,19 @@ All certificates are signed by the intermediate CA and verified against the full
 |------|---------|
 | `certs/ca-chain.cert.pem` | CA trust chain (intermediate + root), used by all services for certificate verification |
 | `certs/server.crt` / `server.key` | PostgreSQL server certificate and private key (CN=postgres) |
-| `certs/pgbouncer.crt` / `pgbouncer.key` | PgBouncer server certificate and private key (CN=database) |
-| `certs/client.crt` / `client.key` | Client certificate and private key (CN=client, extendedKeyUsage=clientAuth) |
+| `certs/pgbouncer.crt` / `pgbouncer.key` | PgBouncer certificate and private key (CN=database, used for both frontend server auth and backend client auth) |
+| `certs/client.crt` / `client.key` | Client certificate and private key (CN=finance, extendedKeyUsage=clientAuth) |
 
 ### Connecting to the Database
 
 From within the client container, connect to the database through PgBouncer as the `finance` user:
 
 ```bash
-psql "host=database port=5432 dbname=mydb user=finance password=finance_pass \
-  sslmode=require sslcert=/certs/client.crt sslkey=/certs/client.key sslrootcert=/certs/ca.crt"
+psql "host=database port=5432 dbname=mydb user=finance \
+  sslmode=verify-full sslcert=/certs/client.crt sslkey=/certs/client.key sslrootcert=/certs/ca.crt"
 ```
+
+PgBouncer authenticates that frontend certificate and then opens the PostgreSQL session as backend role `database`, so PostgreSQL-side role checks apply to `database` rather than `finance`.
 
 ## 3. Audit Results
 
@@ -118,20 +121,19 @@ The following tests were executed against the running `with_proxy` stack to veri
 |---|------|--------|----------|
 | 1 | PostgreSQL port not exposed to host | **PASS** | `docker compose port postgres 5432` returns `:0` (no binding); PgBouncer returns `0.0.0.0:5432` |
 | 2 | SSL enabled on PostgreSQL | **PASS** | `SHOW ssl` returns `on` |
-| 3 | Client with cert + password connects | **PASS** | `psql` with `sslmode=require sslcert=/certs/client.crt sslkey=/certs/client.key` as `finance` successfully returns all rows from `secret_data` |
+| 3 | Client with cert connects without password | **PASS** | `psql` with `sslmode=verify-full sslcert=/certs/client.crt sslkey=/certs/client.key` as `finance` succeeds without a password; PostgreSQL reports `current_user = database` |
 | 4 | Client without cert is rejected | **PASS** | `psql` without cert files: `SSL error: tlsv13 alert certificate required` |
-| 5 | Client with cert but wrong password is rejected | **PASS** | `psql` with cert but `password=wrong`: `FATAL: SASL authentication failed` |
-| 6 | Finance user cannot INSERT | **PASS** | `INSERT INTO secret_data VALUES (...)`: `ERROR: permission denied for table secret_data` |
-| 7 | PgBouncer-to-PostgreSQL backend uses SSL | **PASS** | `pg_stat_ssl JOIN pg_stat_activity` shows `ssl = t` for PgBouncer's connection from `192.168.156.3` |
+| 5 | Client without cert is rejected even over trusted TLS | **PASS** | `psql` with `sslrootcert` but without `sslcert`/`sslkey`: `SSL error: tlsv13 alert certificate required` |
+| 6 | Backend connection uses certificate-authenticated SSL | **PASS** | `pg_stat_ssl JOIN pg_stat_activity` shows `ssl = t` and a non-null `client_dn` for PgBouncer's `database` session |
+| 7 | Backend role cannot INSERT | **PASS** | `INSERT INTO secret_data VALUES (...)` through PgBouncer returns `ERROR: permission denied for table secret_data`, confirming the effective backend role `database` remains read-only |
 | 8 | Client cannot reach PostgreSQL directly | **PASS** | `echo > /dev/tcp/postgres/5432` from client: `postgres: Name or service not known` |
 
 ### Audit Interpretation
 
 - **Tests 1 and 8** confirm **network isolation**: PostgreSQL is unreachable from both the host and the client container.
-- **Test 2 and 7** confirm **TLS everywhere**: PostgreSQL has SSL enabled, and the backend connection from PgBouncer uses it.
-- **Tests 3 and 4** confirm **mTLS**: a valid client certificate is required to establish a connection.
-- **Test 5** confirms **password authentication**: the certificate alone is insufficient; the correct password is also required.
-- **Test 6** confirms **least-privilege authorization**: the `finance` role can read data but cannot modify it.
+- **Tests 2 and 6** confirm **TLS everywhere**: PostgreSQL has SSL enabled, and the backend connection from PgBouncer uses certificate-authenticated TLS.
+- **Tests 3, 4, and 5** confirm **passwordless mTLS**: a valid client certificate is required to establish a connection, and no password is needed.
+- **Test 7** confirms **least-privilege authorization**: the backend role can read data but cannot modify it.
 
 ## 4. Baseline vs. Hardened Comparison
 
@@ -141,6 +143,6 @@ The following tests were executed against the running `with_proxy` stack to veri
 | Connection proxy | None | PgBouncer acts as a transparent proxy (service name `database`) |
 | Encryption | None | TLS on all connections (client-to-proxy and proxy-to-database) |
 | Client identity | None | mTLS -- clients must present a CA-signed certificate |
-| Authentication | Superuser password only | Two-factor: client certificate + SCRAM-SHA-256 password |
-| Authorization | Superuser (`postgres`) with full access | Least-privilege role (`finance`) with SELECT-only grant |
+| Authentication | Superuser password only | Certificate-only auth on both hops |
+| Authorization | Superuser (`postgres`) with full access | Least-privilege backend role (`database`) with SELECT-only grant |
 | Network segmentation | Single default network | Separate `frontend` and `backend` networks |
