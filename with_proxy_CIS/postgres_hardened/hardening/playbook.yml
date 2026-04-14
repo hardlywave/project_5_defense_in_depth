@@ -1,0 +1,12 @@
+---
+- name: Apply PostgreSQL CIS hardening controls during image build
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    postgres_sample_config_candidates:
+      - /usr/share/postgresql/16/postgresql.conf.sample
+      - /usr/share/postgresql/postgresql.conf.sample
+  tasks:
+    - name: Apply CIS 3.1.20 hardening tasks
+      ansible.builtin.import_tasks: controls/cis_3_1_20_log_connections/main.yml

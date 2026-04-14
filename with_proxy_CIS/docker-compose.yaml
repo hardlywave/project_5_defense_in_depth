@@ -1,0 +1,96 @@
+services:
+
+  postgres:
+    build:
+      context: .
+      dockerfile: postgres_hardened/Dockerfile
+    image: with-proxy-cis/postgres-hardened:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "wavbiz-siwbi7-naXcoc"
+      POSTGRES_DB: finance
+    networks:
+      - backend
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./certs/server.crt:/var/lib/postgresql/server.crt:ro
+      - ./certs/server.key:/var/lib/postgresql/server.key
+      - ./certs/ca-chain.cert.pem:/var/lib/postgresql/ca.crt:ro
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    command:
+      - bash
+      - -c
+      - |
+        cp /var/lib/postgresql/server.key /tmp/server.key
+        chown postgres:postgres /tmp/server.key
+        chmod 0600 /tmp/server.key
+        exec docker-entrypoint.sh postgres \
+          -c ssl=on \
+          -c ssl_cert_file=/var/lib/postgresql/server.crt \
+          -c ssl_key_file=/tmp/server.key \
+          -c ssl_ca_file=/var/lib/postgresql/ca.crt \
+          -c hba_file=/etc/postgresql/pg_hba.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  database:
+    image: edoburu/pgbouncer
+    networks:
+      - backend
+      - frontend
+    ports:
+      - "${PGBOUNCER_HOST_PORT:-5432}:5432"
+    volumes:
+      - ./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./certs/ca-chain.cert.pem:/etc/pgbouncer/certs/ca.crt:ro
+      - ./certs/pgbouncer.crt:/etc/pgbouncer/certs/pgbouncer.crt:ro
+      - ./certs/pgbouncer.key:/etc/pgbouncer/certs/pgbouncer.key:ro
+      - ./userlist.txt:/etc/pgbouncer/userlist.txt
+    command: ["pgbouncer", "/etc/pgbouncer/pgbouncer.ini"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  client:
+    image: postgres:16
+    networks:
+      - frontend
+    volumes:
+      - ./certs/client.crt:/certs-source/client.crt:ro
+      - ./certs/client.key:/certs-source/client.key:ro
+      - ./certs/ca-chain.cert.pem:/certs-source/ca.crt:ro
+      - ./client-entrypoint.sh:/usr/local/bin/client-entrypoint.sh:ro
+    tmpfs:
+      - /certs
+    entrypoint: ["/usr/local/bin/client-entrypoint.sh"]
+    command: ["sleep", "infinity"]
+    depends_on:
+      - database
+
+  audit:
+    image: with-proxy-cis/postgres-hardened:16
+    profiles:
+      - audit
+    networks:
+      - backend
+    volumes:
+      - ./certs/pgbouncer.crt:/certs-source/pgbouncer.crt:ro
+      - ./certs/pgbouncer.key:/certs-source/pgbouncer.key:ro
+      - ./certs/ca-chain.cert.pem:/certs-source/ca.crt:ro
+    entrypoint:
+      - bash
+      - -c
+      - |
+        cp /certs-source/pgbouncer.key /tmp/pgbouncer.key
+        chmod 0600 /tmp/pgbouncer.key
+        exec ansible-playbook /opt/postgres_hardening/controls/cis_3_1_20_log_connections/audit.yml
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+networks:
+  backend:
+  frontend:

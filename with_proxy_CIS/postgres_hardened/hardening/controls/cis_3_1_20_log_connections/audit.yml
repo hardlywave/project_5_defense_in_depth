@@ -1,0 +1,37 @@
+---
+- name: Audit CIS 3.1.20 against the running PostgreSQL service
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    cis_audit_postgres_host: "{{ audit_postgres_host | default('postgres', true) }}"
+    cis_audit_postgres_port: "{{ audit_postgres_port | default('5432', true) }}"
+    cis_audit_postgres_db: "{{ audit_postgres_db | default('finance', true) }}"
+    cis_audit_postgres_user: "{{ audit_postgres_user | default('database', true) }}"
+    cis_audit_sslmode: "{{ audit_sslmode | default('verify-full', true) }}"
+    cis_audit_ssl_cert_file: "{{ audit_ssl_cert_file | default('/certs-source/pgbouncer.crt', true) }}"
+    cis_audit_ssl_key_file: "{{ audit_ssl_key_file | default('/tmp/pgbouncer.key', true) }}"
+    cis_audit_ssl_rootcert_file: "{{ audit_ssl_rootcert_file | default('/certs-source/ca.crt', true) }}"
+  tasks:
+    - name: Wait for PostgreSQL to accept SSL connections
+      ansible.builtin.wait_for:
+        host: "{{ cis_audit_postgres_host }}"
+        port: "{{ cis_audit_postgres_port | int }}"
+        timeout: 30
+
+    - name: Query the running log_connections setting in a fresh session
+      ansible.builtin.command:
+        argv:
+          - psql
+          - "host={{ cis_audit_postgres_host }} port={{ cis_audit_postgres_port }} dbname={{ cis_audit_postgres_db }} user={{ cis_audit_postgres_user }} sslmode={{ cis_audit_sslmode }} sslcert={{ cis_audit_ssl_cert_file }} sslkey={{ cis_audit_ssl_key_file }} sslrootcert={{ cis_audit_ssl_rootcert_file }}"
+          - -Atqc
+          - SHOW log_connections;
+      register: log_connections_audit
+      changed_when: false
+
+    - name: Assert CIS 3.1.20 passes at runtime
+      ansible.builtin.assert:
+        that:
+          - log_connections_audit.stdout | trim == 'on'
+        fail_msg: "CIS 3.1.20 failed: expected log_connections to be 'on' but got '{{ log_connections_audit.stdout | trim }}'."
+        success_msg: "CIS 3.1.20 passed: log_connections is enabled in the running PostgreSQL instance."

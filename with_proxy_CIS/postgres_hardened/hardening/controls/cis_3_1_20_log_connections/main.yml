@@ -1,0 +1,32 @@
+---
+- name: Inspect PostgreSQL sample configuration candidates
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ postgres_sample_config_candidates }}"
+  register: postgres_sample_config_stats
+
+- name: Ensure at least one PostgreSQL sample configuration file exists
+  ansible.builtin.assert:
+    that:
+      - (postgres_sample_config_stats.results | selectattr('stat.exists') | list | length) > 0
+    fail_msg: No PostgreSQL sample configuration file was found for CIS 3.1.20 hardening.
+
+- name: Enable log_connections in PostgreSQL sample configuration
+  ansible.builtin.lineinfile:
+    path: "{{ item.stat.path }}"
+    regexp: "^[#[:space:]]*log_connections[[:space:]]*="
+    line: "log_connections = 'on'"
+    state: present
+  loop: "{{ postgres_sample_config_stats.results }}"
+  when: item.stat.exists
+
+- name: Verify log_connections is enabled in PostgreSQL sample configuration
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -E
+      - ^log_connections = 'on'$
+      - "{{ item.stat.path }}"
+  changed_when: false
+  loop: "{{ postgres_sample_config_stats.results }}"
+  when: item.stat.exists
