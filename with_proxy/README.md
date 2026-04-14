@@ -16,6 +16,8 @@ You can access the database via the `client` container:
 1. Access the bash shell of the container: `docker exec -it client bash`
 2. Connect to the database: `psql "host=database port=5432 dbname=mydb user=finance sslmode=verify-full sslcert=/certs/client.crt sslkey=/certs/client.key sslrootcert=/certs/ca.crt"`
 
+> The password of the client's secret key is `xipXig-xohryq-hebno6`. 
+
 ---
 
 ## Rules for the attacker
